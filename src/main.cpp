@@ -9,7 +9,6 @@
 #include <FastLED.h>
 
 #define DEBUG
-#define BLE_DEBUG
 #define MODBUS_DEBUG
 
 
@@ -18,7 +17,9 @@
 #define DATA_PIN 19
 CRGB leds[NUM_LEDS];
 
-// //旋转编码器定义部分
+//旋转编码器定义部分
+//旋转编码器貌似需要很快的主循环
+#define ENCODER_USE_INTERRUPTS
 Encoder myEnc(7, 11);
 
 //屏幕相关定义
