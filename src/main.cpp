@@ -11,6 +11,7 @@
 #define DEBUG
 #define BLE_DEBUG
 
+//LED指示灯定义部分
 #define NUM_LEDS 1
 #define DATA_PIN 19
 CRGB leds[NUM_LEDS];
@@ -247,11 +248,25 @@ class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
   } // onResult
 }; // MyAdvertisedDeviceCallbacks
 
+void BLE_connect(){
+	doConnect = false;
+	connected = false;
+	doScan = false;
+	BLEDevice::init("");
+	BLEScan* pBLEScan = BLEDevice::getScan();
+	pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+	pBLEScan->setInterval(1349);
+	pBLEScan->setWindow(449);
+	pBLEScan->setActiveScan(true);
+	pBLEScan->start(5, false);
+}
+
 void setup(void) {
 	//ODO累计值初始化
 	preferences.begin("nvs-log", false);
 	preferences.getBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
-	//显示部分改为显示累积数值
+
+	//显示部分改为显示累积数值,显示时间取决于蓝牙的扫描和连接时间
 	u8g2.begin();
 	u8g2.firstPage();
 	do {
@@ -268,372 +283,367 @@ void setup(void) {
 		u8g2.print("S");
 	} while ( u8g2.nextPage() );
 
-	Serial.begin(115200);
-	//LED测试
+	//上电后立刻关闭LED
 	FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);  // GRB ordering is assumed
 	leds[0] = CRGB::Black;
 	FastLED.show();
+	//使用硬件频率计
+	attachInterrupt(18,frequency_meter,FALLING);
+	//开始连接蓝牙
+	// BLE_connect();
+	//MODBUS主机部分
+	Serial1.begin(115200);
+	node.begin(1, Serial1);
 
-	// //MODBUS主机部分
-	// Serial1.begin(115200);
-	// node.begin(1, Serial1);
-	// //设置按键切换状态
-	// pinMode(5,INPUT_PULLUP);
 	// //MODEBUS从机设置
-	// Serial.begin(115200, SERIAL_8N1);
-	// mb.begin(&Serial);
-	// mb.slave(SLAVE_ID);
-	// modbusrtu_dataprepare();
-	// // Serial.println("Starting Arduino BLE Client application...");
-	// BLEDevice::init("");
-	// BLEScan* pBLEScan = BLEDevice::getScan();
-	// pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
-	// pBLEScan->setInterval(1349);
-	// pBLEScan->setWindow(449);
-	// pBLEScan->setActiveScan(true);
-	// pBLEScan->start(5, false);
-	// //使用硬件频率计
-	// attachInterrupt(18,frequency_meter,FALLING);
+	#ifdef DEBUG
+		Serial.begin(115200, SERIAL_8N1);
+	#endif
+	#ifndef DEBUG
+		Serial.begin(115200, SERIAL_8N1);
+		mb.begin(&Serial);
+		mb.slave(SLAVE_ID);
+		modbusrtu_dataprepare();
+	#endif
+
+
 }
 
 void loop(void){
-	//测试外设
-	#ifdef DEBUG
-	if (0 == digitalRead(5)){
+	//在主循环中连接蓝牙
+	if (doConnect == true) {
+		if (connectToServer()) {
+			#ifdef DEBUG
+			Serial.println("We are now connected to the BLE Server.");
+			#endif
+		} else {
+			#ifdef DEBUG
+			Serial.println("We have failed to connect to the server; there is nothin more we will do.");
+			#endif
+		}
+		doConnect = false;
+	}
+	//在蓝牙失联后，可以使用按键重新连接之。
+	if (!connected){
+		if (0 == digitalRead(4)){
+			//消抖后重连蓝牙
+			delay(20);
+			while(!digitalRead(4));
+			delay(20);
+			#ifdef DEBUG
+			Serial.println("NOW ble is reconnectting.");
+			#endif
+			BLE_connect();
+		}
+	}
+	//就一个串口，调试的时候就不启动modbus从机了
+	#ifndef DEBUG
+		modbusrtu_dataprepare();
+		mb.task();
+		yield();
+	#endif
+	//循环按键被按下
+  //0、开机等待模式
+  //1、恒功率模式给超级电容充电
+  //2、恒压模式牵引固定电阻实现恒功率
+  //3、轮显所有数据
+	uint8_t result;
+	//定义一个时间戳，来研究运行速度
+	// unsigned long running_time_stamp = micros();
+	if (0 == working_mode)
+	{
+			//一旦发生变化，立刻更新
+		power_set_encodernewpos = myEnc.read();
+		if (power_set_encoderpos != power_set_encodernewpos) {
+			//首先立刻退出待机界面
+			screen_mode = 0;
+			screen_mode_timestamp = millis();
+			//检查极限值，不能太小也不能太大
+			power_set = power_pre_set + power_set_encodernewpos;
+			power_set = MAX(power_set,50);
+			power_set = MIN(power_set,300);
+			//笨办法拼凑字符串
+			power_set_string[2] = 0x30 + power_set%10;
+			power_set_string[1] = 0x30 + (power_set/10)%10;
+			power_set_string[0] = 0x30 + (power_set/100)%10;
+			power_set_string[3] = 'W';
+			power_set_string[4] = ' ';
+			//更新位置信息
+			power_set_encoderpos = power_set_encodernewpos;
+			//更新显示
+			u8g2.firstPage();
+			do {
+				u8g2.setFont(u8g2_font_inb24_mf);
+				u8g2.drawStr(1, 48, power_set_string);
+			} while ( u8g2.nextPage() );
+		} 
+
+		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
+		unsigned long currentadjust_time_gap = millis() - currentadjust_time_stamp;
+		if(currentadjust_time_gap > 5000){
+			// MODBUS更新部分，要不断的更新，因为输出电压在不断变化
+			uint16_t current_set = 0;
+			//读取输出电压
+			result = node.readHoldingRegisters(2, 1);
+			if (result == node.ku8MBSuccess)
+			{
+				//直接计算设定功率除以输出电压
+				current_set = power_set/(node.getResponseBuffer(0)/100.0)*100;
+				//大于20A则等于20A
+				current_set = MIN(current_set,2000);
+			}
+			//回写设定电流和限制电压
+			node.setTransmitBuffer(0, voltage_limit);
+			node.setTransmitBuffer(1, current_set);
+			result = node.writeMultipleRegisters(0, 2);
+			// //稍作延时，否则读写DC-DC的频率太高了,
+			delay(50);
+			currentadjust_time_stamp = millis();
+		}
+	}
+	if (1 == working_mode)
+	{
+		voltage_set_encodernewpos = myEnc.read();;
+		//一旦发生变化，立刻更新
+		if (voltage_set_encoderpos != voltage_set_encodernewpos) {
+			//首先立刻退出待机界面
+			screen_mode = 0;
+			screen_mode_timestamp = millis();
+			//有新的输入要先检查当前模式
+			voltage_set = voltage_pre_set + voltage_set_encodernewpos*5;
+			voltage_set = MAX(voltage_set,500);
+			voltage_set = MIN(voltage_set,3000);
+			voltage_set_string[2] = '.';
+			voltage_set_string[3] = 0x30 + (voltage_set/10)%10;
+			voltage_set_string[1] = 0x30 + (voltage_set/100)%10;
+			voltage_set_string[0] = 0x30 + (voltage_set/1000)%10;
+			voltage_set_string[4] = 'V';
+			//更新变化对比存储
+			voltage_set_encoderpos = voltage_set_encodernewpos;
+			//更新显示
+			u8g2.firstPage();
+			do {
+				u8g2.setFont(u8g2_font_inb24_mf);
+				u8g2.drawStr(1, 48, voltage_set_string);
+			} while ( u8g2.nextPage() );
+			// //不同于恒功率控制，电压设置只需要一次,图方便就一直设置好了。
+			// //回写设定电压和限制电流
+			// node.setTransmitBuffer(0, voltage_set);
+			// node.setTransmitBuffer(1, 2000);
+			// result = node.writeMultipleRegisters(0, 2);
+			// delay(100);	
+		}
+		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
+		unsigned long voltageadjust_time_gap = millis() - voltageadjust_time_stamp;
+		if(voltageadjust_time_gap > 2000){
+			node.setTransmitBuffer(0, voltage_set);
+			node.setTransmitBuffer(1, 2000);
+			result = node.writeMultipleRegisters(0, 2);
+			delay(50);
+			voltageadjust_time_stamp = millis();
+		}
+	}
+	if (0 == digitalRead(5))
+	{
 
 		//消抖后改变模式
 		delay(20);
 		while(!digitalRead(5));
 		delay(20);
-		Serial.print("Button A pressed");
-	}
-	if (0 == digitalRead(4)){
+		working_mode ++;
 
-		//消抖后改变模式
-		delay(20);
-		while(!digitalRead(4));
-		delay(20);
-		Serial.print("Button B pressed");
+		//开机模式，开机后必须按键才能进入
+		if (1 == starup_mode)
+		{
+			starup_mode = 0;
+			working_mode = 0;
+			
+			// goto breakflag;
+		}
+		//待机模式下，按键立刻退出，但不影响模式变化
+		if (1 == screen_mode)
+		{
+			//首先立刻退出待机界面，但不影响模式
+			screen_mode = 0;
+			screen_mode_timestamp = millis();
+			working_mode--;
+			// goto breakflag;
+		}
+
+		//即便不在待机模式下，按键也应清零倒计时
+		screen_mode_timestamp = millis();
+
+		//循环挡位
+		working_mode = working_mode%2;
+		if (0 == working_mode)
+		{
+			//恢复其编码器偏移数值
+			myEnc.write(power_set_encoderpos);
+			//更新显示
+			u8g2.firstPage();
+			do {
+				u8g2.setFont(u8g2_font_inb24_mf);
+				u8g2.drawStr(1, 48, power_set_string);
+			} while ( u8g2.nextPage() );
+		}
+		if (1 == working_mode)
+		{
+			//恢复其编码器偏移数值
+			myEnc.write(voltage_set_encoderpos);
+			//更新显示
+			u8g2.firstPage();
+			do {
+				u8g2.setFont(u8g2_font_inb24_mf);
+				u8g2.drawStr(1, 48, voltage_set_string);
+			} while ( u8g2.nextPage() );
+		}
+
 	}
-	delay(500);
-	Serial.println(myEnc.read());
-	#endif
+	if (1 == screen_mode)
+	{
+		//按键按下，会退出
+		//编码器转动，会退出
+		//退出时标记时间，时间到了，又会进入
+		u8g2.firstPage();
+		do {
+			u8g2.drawHLine(0,0,128);
+			u8g2.drawHLine(0,31,128);
+			u8g2.drawHLine(0,63,128);
+			u8g2.drawVLine(0,0,64);
+			u8g2.drawVLine(63,0,64);
+			u8g2.drawVLine(127,0,64);
+			char output_power_string[5] = "100W";
+			output_power_string[2] = 0x30 + output_power%10;
+			output_power_string[1] = 0x30 + (output_power/10)%10;
+			output_power_string[0] = 0x30 + (output_power/100)%10;
+			if(output_power < 10){
+				output_power_string[2] = 0x2D;
+				output_power_string[1] = 0x2D;
+				output_power_string[0] = 0x2D;
+			}
+			u8g2.setFont(u8g2_font_VCR_OSD_tu);
+			u8g2.drawStr(6, 24, output_power_string);
+
+			char cadence_string[5] = "100R";
+			cadence_string[2] = 0x30 + cadence%10;
+			cadence_string[1] = 0x30 + (cadence/10)%10;
+			cadence_string[0] = 0x30 + (cadence/100)%10;
+			if(cadence < 10){
+				cadence_string[2] = 0x2D;
+				cadence_string[1] = 0x2D;
+				cadence_string[0] = 0x2D;
+			}
+			u8g2.setFont(u8g2_font_VCR_OSD_tu);
+			u8g2.drawStr(69, 24, cadence_string);
+
+			char heart_rate_string[5] = "100B";
+			heart_rate_string[2] = 0x30 + heart_rate%10;
+			heart_rate_string[1] = 0x30 + (heart_rate/10)%10;
+			heart_rate_string[0] = 0x30 + (heart_rate/100)%10;
+			if(!connected){
+				heart_rate_string[2] = 0x2D;
+				heart_rate_string[1] = 0x2D;
+				heart_rate_string[0] = 0x2D;
+			}
+			u8g2.setFont(u8g2_font_VCR_OSD_tu);
+			u8g2.drawStr(6, 55, heart_rate_string);
+
+			char cumulative_time_string[6] = "1000S";
+			cumulative_time_string[3] = 0x30 + cumulative_time%10;
+			cumulative_time_string[2] = 0x30 + (cumulative_time/10)%10;
+			cumulative_time_string[1] = 0x30 + (cumulative_time/100)%10;
+			cumulative_time_string[0] = 0x30 + (cumulative_time/1000)%10;
+			u8g2.setFont(u8g2_font_VCR_OSD_tu);
+			u8g2.drawStr(65, 55, cumulative_time_string);
+
+		} while ( u8g2.nextPage() );
+	}
+	if (0 == screen_mode)
+	{
+		//不断刷新倒计时
+		unsigned long screen_timer_gap;
+		screen_timer_gap = millis()-screen_mode_timestamp;
+		if (screen_timer_gap > 8000)
+		{
+			screen_mode = 1;
+		}
+	}
+
+	// unsigned l.20ong running_time_stamp = micros();
+	//用于使用MODBUS读取DC-DC的信息，得到输出功率，进而对比起最大值
+	//读取功率数据
+	//！！！！！特别注意，如果读之前刚刚写入过，读取就会非常慢，写入后延时然后再读取。
+	//读取过快，功率显示闪动很大
+	unsigned long outputpower_updatetime_gap = millis() - outputpower_updatetime_stamp;
+	if(outputpower_updatetime_gap > 1000){
+		result = node.readHoldingRegisters(4, 1);
+		if (result == node.ku8MBSuccess)
+		{
+			output_power = int(node.getResponseBuffer(0)/10);
+			if(output_power > max_output_power)
+			{
+				max_output_power = output_power;
+			}
+		}
+		outputpower_updatetime_stamp = millis();
+	}
+
+	//为了测试，直接截断功率赋值
+	// output_power = 200;
+
+	// Serial.println(micros()-running_time_stamp);
+	//功率大于100W开始计时
+	unsigned long cumulative_time_gap = millis() - cumulative_time_stamp;
+	if(cumulative_time_gap > 1000){
+		if(output_power > 100)
+		{
+			cumulative_time ++;
+			//在这里读取累计电量和累计时长，累加后写入NVS,实际记录WS，显示的时候转换为WH
+			// preferences.getBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
+			nvs_logger.cumulative_Ws = nvs_logger.cumulative_Ws + output_power;
+			nvs_logger.cumulative_Seconds ++;
+			preferences.putBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
+		}
+		cumulative_time_stamp = millis();
+	}
+	//找到最高转速
+	if(cadence > max_cadence)
+	{
+		max_cadence = cadence;
+	}
+	//频率计数长时间不中断的时候，清零频率,从中断里不断更新时间戳
+	unsigned long cadence_gap = millis() - cadence_time_stamp;
+	if(cadence_gap > 5000){
+		cadence = 0;
+	}
+	//找到最大心率
+	if(heart_rate > max_heart_rate)
+	{
+		max_heart_rate = heart_rate;
+	}
 }
 
 // void loop(void) {
-//   //0、开机等待模式
-//   //1、恒功率模式给超级电容充电
-//   //2、恒压模式牵引固定电阻实现恒功率
-//   //3、轮显所有数据
-// 	uint8_t result;
-// 	//定义一个时间戳，来研究运行速度
-// 	// unsigned long running_time_stamp = micros();
-// 	if (0 == working_mode)
-// 	{
-// 			//一旦发生变化，立刻更新
-// 		power_set_encodernewpos = myEnc.read();
-// 		if (power_set_encoderpos != power_set_encodernewpos) {
-// 			//首先立刻退出待机界面
-// 			screen_mode = 0;
-// 			screen_mode_timestamp = millis();
-// 			//检查极限值，不能太小也不能太大
-// 			power_set = power_pre_set + power_set_encodernewpos;
-// 			power_set = MAX(power_set,50);
-// 			power_set = MIN(power_set,300);
-// 			//笨办法拼凑字符串
-// 			power_set_string[2] = 0x30 + power_set%10;
-// 			power_set_string[1] = 0x30 + (power_set/10)%10;
-// 			power_set_string[0] = 0x30 + (power_set/100)%10;
-// 			power_set_string[3] = 'W';
-// 			power_set_string[4] = ' ';
-// 			//更新位置信息
-// 			power_set_encoderpos = power_set_encodernewpos;
-// 			//更新显示
-// 			u8g2.firstPage();
-// 			do {
-// 				u8g2.setFont(u8g2_font_inb24_mf);
-// 				u8g2.drawStr(1, 48, power_set_string);
-// 			} while ( u8g2.nextPage() );
-// 		} 
+	//测试外设
+	// #ifdef DEBUG
+	// if (0 == digitalRead(5)){
 
-// 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
-// 		unsigned long currentadjust_time_gap = millis() - currentadjust_time_stamp;
-// 		if(currentadjust_time_gap > 5000){
-// 			// MODBUS更新部分，要不断的更新，因为输出电压在不断变化
-// 			uint16_t current_set = 0;
-// 			//读取输出电压
-// 			result = node.readHoldingRegisters(2, 1);
-// 			if (result == node.ku8MBSuccess)
-// 			{
-// 				//直接计算设定功率除以输出电压
-// 				current_set = power_set/(node.getResponseBuffer(0)/100.0)*100;
-// 				//大于20A则等于20A
-// 				current_set = MIN(current_set,2000);
-// 			}
-// 			//回写设定电流和限制电压
-// 			node.setTransmitBuffer(0, voltage_limit);
-// 			node.setTransmitBuffer(1, current_set);
-// 			result = node.writeMultipleRegisters(0, 2);
-// 			// //稍作延时，否则读写DC-DC的频率太高了,
-// 			delay(50);
-// 			currentadjust_time_stamp = millis();
-// 		}
-// 	}
-// 	if (1 == working_mode)
-// 	{
-// 		voltage_set_encodernewpos = myEnc.read();;
-// 		//一旦发生变化，立刻更新
-// 		if (voltage_set_encoderpos != voltage_set_encodernewpos) {
-// 			//首先立刻退出待机界面
-// 			screen_mode = 0;
-// 			screen_mode_timestamp = millis();
-// 			//有新的输入要先检查当前模式
-// 			voltage_set = voltage_pre_set + voltage_set_encodernewpos*5;
-// 			voltage_set = MAX(voltage_set,500);
-// 			voltage_set = MIN(voltage_set,3000);
-// 			voltage_set_string[2] = '.';
-// 			voltage_set_string[3] = 0x30 + (voltage_set/10)%10;
-// 			voltage_set_string[1] = 0x30 + (voltage_set/100)%10;
-// 			voltage_set_string[0] = 0x30 + (voltage_set/1000)%10;
-// 			voltage_set_string[4] = 'V';
-// 			//更新变化对比存储
-// 			voltage_set_encoderpos = voltage_set_encodernewpos;
-// 			//更新显示
-// 			u8g2.firstPage();
-// 			do {
-// 				u8g2.setFont(u8g2_font_inb24_mf);
-// 				u8g2.drawStr(1, 48, voltage_set_string);
-// 			} while ( u8g2.nextPage() );
-// 			// //不同于恒功率控制，电压设置只需要一次,图方便就一直设置好了。
-// 			// //回写设定电压和限制电流
-// 			// node.setTransmitBuffer(0, voltage_set);
-// 			// node.setTransmitBuffer(1, 2000);
-// 			// result = node.writeMultipleRegisters(0, 2);
-// 			// delay(100);	
-// 		}
-// 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
-// 		unsigned long voltageadjust_time_gap = millis() - voltageadjust_time_stamp;
-// 		if(voltageadjust_time_gap > 2000){
-// 			node.setTransmitBuffer(0, voltage_set);
-// 			node.setTransmitBuffer(1, 2000);
-// 			result = node.writeMultipleRegisters(0, 2);
-// 			delay(50);
-// 			voltageadjust_time_stamp = millis();
-// 		}
-// 	}
-// 	if (0 == digitalRead(5))
-// 	{
+	// 	//消抖后改变模式
+	// 	delay(20);
+	// 	while(!digitalRead(5));
+	// 	delay(20);
+	// 	Serial.print("Button A pressed");
+	// }
+	// if (0 == digitalRead(4)){
 
-// 		//消抖后改变模式
-// 		delay(20);
-// 		while(!digitalRead(5));
-// 		delay(20);
-// 		working_mode ++;
-
-// 		//开机模式，开机后必须按键才能进入
-// 		if (1 == starup_mode)
-// 		{
-// 			starup_mode = 0;
-// 			working_mode = 0;
-			
-// 			// goto breakflag;
-// 		}
-// 		//待机模式下，按键立刻退出，但不影响模式变化
-// 		if (1 == screen_mode)
-// 		{
-// 			//首先立刻退出待机界面，但不影响模式
-// 			screen_mode = 0;
-// 			screen_mode_timestamp = millis();
-// 			working_mode--;
-// 			// goto breakflag;
-// 		}
-
-// 		//即便不在待机模式下，按键也应清零倒计时
-// 		screen_mode_timestamp = millis();
-
-// 		//循环挡位
-// 		working_mode = working_mode%2;
-// 		if (0 == working_mode)
-// 		{
-// 			//恢复其编码器偏移数值
-// 			myEnc.write(power_set_encoderpos);
-// 			//更新显示
-// 			u8g2.firstPage();
-// 			do {
-// 				u8g2.setFont(u8g2_font_inb24_mf);
-// 				u8g2.drawStr(1, 48, power_set_string);
-// 			} while ( u8g2.nextPage() );
-// 		}
-// 		if (1 == working_mode)
-// 		{
-// 			//恢复其编码器偏移数值
-// 			myEnc.write(voltage_set_encoderpos);
-// 			//更新显示
-// 			u8g2.firstPage();
-// 			do {
-// 				u8g2.setFont(u8g2_font_inb24_mf);
-// 				u8g2.drawStr(1, 48, voltage_set_string);
-// 			} while ( u8g2.nextPage() );
-// 		}
-
-// 	}
-// 	if (1 == screen_mode)
-// 	{
-// 		//按键按下，会退出
-// 		//编码器转动，会退出
-// 		//退出时标记时间，时间到了，又会进入
-// 		u8g2.firstPage();
-// 		do {
-// 			u8g2.drawHLine(0,0,128);
-// 			u8g2.drawHLine(0,31,128);
-// 			u8g2.drawHLine(0,63,128);
-// 			u8g2.drawVLine(0,0,64);
-// 			u8g2.drawVLine(63,0,64);
-// 			u8g2.drawVLine(127,0,64);
-// 			char output_power_string[5] = "100W";
-// 			output_power_string[2] = 0x30 + output_power%10;
-// 			output_power_string[1] = 0x30 + (output_power/10)%10;
-// 			output_power_string[0] = 0x30 + (output_power/100)%10;
-// 			if(output_power < 10){
-// 				output_power_string[2] = 0x2D;
-// 				output_power_string[1] = 0x2D;
-// 				output_power_string[0] = 0x2D;
-// 			}
-// 			u8g2.setFont(u8g2_font_VCR_OSD_tu);
-// 			u8g2.drawStr(6, 24, output_power_string);
-
-// 			char cadence_string[5] = "100R";
-// 			cadence_string[2] = 0x30 + cadence%10;
-// 			cadence_string[1] = 0x30 + (cadence/10)%10;
-// 			cadence_string[0] = 0x30 + (cadence/100)%10;
-// 			if(cadence < 10){
-// 				cadence_string[2] = 0x2D;
-// 				cadence_string[1] = 0x2D;
-// 				cadence_string[0] = 0x2D;
-// 			}
-// 			u8g2.setFont(u8g2_font_VCR_OSD_tu);
-// 			u8g2.drawStr(69, 24, cadence_string);
-
-// 			char heart_rate_string[5] = "100B";
-// 			heart_rate_string[2] = 0x30 + heart_rate%10;
-// 			heart_rate_string[1] = 0x30 + (heart_rate/10)%10;
-// 			heart_rate_string[0] = 0x30 + (heart_rate/100)%10;
-// 			if(!connected){
-// 				heart_rate_string[2] = 0x2D;
-// 				heart_rate_string[1] = 0x2D;
-// 				heart_rate_string[0] = 0x2D;
-// 			}
-// 			u8g2.setFont(u8g2_font_VCR_OSD_tu);
-// 			u8g2.drawStr(6, 55, heart_rate_string);
-
-// 			char cumulative_time_string[6] = "1000S";
-// 			cumulative_time_string[3] = 0x30 + cumulative_time%10;
-// 			cumulative_time_string[2] = 0x30 + (cumulative_time/10)%10;
-// 			cumulative_time_string[1] = 0x30 + (cumulative_time/100)%10;
-// 			cumulative_time_string[0] = 0x30 + (cumulative_time/1000)%10;
-// 			u8g2.setFont(u8g2_font_VCR_OSD_tu);
-// 			u8g2.drawStr(65, 55, cumulative_time_string);
-
-// 		} while ( u8g2.nextPage() );
-// 	}
-// 	if (0 == screen_mode)
-// 	{
-// 		//不断刷新倒计时
-// 		unsigned long screen_timer_gap;
-// 		screen_timer_gap = millis()-screen_mode_timestamp;
-// 		if (screen_timer_gap > 8000)
-// 		{
-// 			screen_mode = 1;
-// 		}
-// 	}
-
-// 	//只要更新全局变量即可，一切自然会进入缓冲
-// 	modbusrtu_dataprepare();
-// 	mb.task();
-// 	yield();
-
-// 	// 蓝牙的循环
-// 	//连接成功就更改标志位
-// 	//不连接的时候及其的拖慢循环时间
-// 	// if (doConnect == true) {
-// 	// 	connectToServer();
-// 	// 	doConnect = false;
-// 	// }
-	
-// 	// //失去连接就开始重连
-// 	// if (!connected) {
-// 	// 	BLEDevice::getScan()->start(5); 
-// 	// } 
-// 	//临时注释掉，协助测试
-// 	if (doConnect == true) {
-// 		if (connectToServer()) {
-// 			#ifdef DEBUG
-// 			Serial.println("We are now connected to the BLE Server.");
-// 			#endif
-// 		} else {
-// 			#ifdef DEBUG
-// 			Serial.println("We have failed to connect to the server; there is nothin more we will do.");
-// 			#endif
-// 		}
-// 	doConnect = false;
-// 	}
-//     if (!connected){
-// 		// BLEDevice::getScan()->start(5);  // this is just example to start scan after disconnect, most likely there is better way to do it in arduino
-// 	}
-
-
-// 	// unsigned l.20ong running_time_stamp = micros();
-// 	//用于使用MODBUS读取DC-DC的信息，得到输出功率，进而对比起最大值
-// 	//读取功率数据
-// 	//！！！！！特别注意，如果读之前刚刚写入过，读取就会非常慢，写入后延时然后再读取。
-// 	//读取过快，功率显示闪动很大
-// 	unsigned long outputpower_updatetime_gap = millis() - outputpower_updatetime_stamp;
-// 	if(outputpower_updatetime_gap > 1000){
-// 		result = node.readHoldingRegisters(4, 1);
-// 		if (result == node.ku8MBSuccess)
-// 		{
-// 			output_power = int(node.getResponseBuffer(0)/10);
-// 			if(output_power > max_output_power)
-// 			{
-// 				max_output_power = output_power;
-// 			}
-// 		}
-// 		outputpower_updatetime_stamp = millis();
-// 	}
-
-// 	//为了测试，直接截断功率赋值
-// 	// output_power = 200;
-
-// 	// Serial.println(micros()-running_time_stamp);
-// 	//功率大于100W开始计时
-// 	unsigned long cumulative_time_gap = millis() - cumulative_time_stamp;
-// 	if(cumulative_time_gap > 1000){
-// 		if(output_power > 100)
-// 		{
-// 			cumulative_time ++;
-// 			//在这里读取累计电量和累计时长，累加后写入NVS,实际记录WS，显示的时候转换为WH
-// 			// preferences.getBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
-// 			nvs_logger.cumulative_Ws = nvs_logger.cumulative_Ws + output_power;
-// 			nvs_logger.cumulative_Seconds ++;
-// 			preferences.putBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
-// 		}
-// 		cumulative_time_stamp = millis();
-// 	}
-// 	//找到最高转速
-// 	if(cadence > max_cadence)
-// 	{
-// 		max_cadence = cadence;
-// 	}
-// 	//频率计数长时间不中断的时候，清零频率,从中断里不断更新时间戳
-// 	unsigned long cadence_gap = millis() - cadence_time_stamp;
-// 	if(cadence_gap > 5000){
-// 		cadence = 0;
-// 	}
-// 	//找到最大心率
-// 	if(heart_rate > max_heart_rate)
-// 	{
-// 		max_heart_rate = heart_rate;
-// 	}
-
-
+	// 	//消抖后改变模式
+	// 	delay(20);
+	// 	while(!digitalRead(4));
+	// 	delay(20);
+	// 	Serial.print("Button B pressed");
+	// }
+	// delay(500);
+	// Serial.println(myEnc.read());
+	// #endif
 // }
+
