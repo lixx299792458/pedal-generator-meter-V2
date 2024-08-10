@@ -10,6 +10,8 @@
 
 #define DEBUG
 #define BLE_DEBUG
+#define MODBUS_DEBUG
+
 
 //LED指示灯定义部分
 #define NUM_LEDS 1
@@ -41,12 +43,12 @@ logtype nvs_logger = {0,0,0,0,0};
 
 //输出参数及模式设置相关变量
 //功率设定值
-#define power_pre_set 160
+uint16_t last_power_set = 150;
 uint16_t power_set = 160;
 //模式1恒流限压模式的电压限定上限
 uint16_t voltage_limit = 1590;
 //模式2恒压模式下的电压设定
-#define voltage_pre_set 2400
+uint16_t last_voltage_set = 2400;
 uint16_t voltage_set = 2400;
 //模式声明
 uint8_t working_mode = 200;
@@ -265,7 +267,11 @@ void setup(void) {
 	//ODO累计值初始化
 	preferences.begin("nvs-log", false);
 	preferences.getBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
-
+	last_power_set = nvs_logger.last_set_watts;
+	last_voltage_set = nvs_logger.last_set_voltage;
+	working_mode = nvs_logger.last_set_mode;
+	power_set = nvs_logger.last_set_watts;
+	voltage_set = nvs_logger.last_set_voltage;
 	//显示部分改为显示累积数值,显示时间取决于蓝牙的扫描和连接时间
 	u8g2.begin();
 	u8g2.firstPage();
@@ -343,42 +349,43 @@ void loop(void){
 		yield();
 	#endif
 	//循环按键被按下
-  //0、开机等待模式
-  //1、恒功率模式给超级电容充电
-  //2、恒压模式牵引固定电阻实现恒功率
-  //3、轮显所有数据
+	//0、开机等待模式
+	//1、恒功率模式给超级电容充电
+	//2、恒压模式牵引固定电阻实现恒功率
+	//3、轮显所有数据
 	uint8_t result;
-	//定义一个时间戳，来研究运行速度
-	// unsigned long running_time_stamp = micros();
 	if (0 == working_mode)
 	{
-			//一旦发生变化，立刻更新
+		//一旦发生变化，立刻更新
 		power_set_encodernewpos = myEnc.read();
 		if (power_set_encoderpos != power_set_encodernewpos) {
 			//首先立刻退出待机界面
 			screen_mode = 0;
 			screen_mode_timestamp = millis();
 			//检查极限值，不能太小也不能太大
-			power_set = power_pre_set + power_set_encodernewpos;
+			power_set = last_power_set + power_set_encodernewpos/4;
+			power_set_encoderpos = power_set_encodernewpos;
+			#ifdef DEBUG
+			Serial.print("power_set = ");
+			Serial.println(power_set);
+			#endif
 			power_set = MAX(power_set,50);
 			power_set = MIN(power_set,300);
-			//笨办法拼凑字符串
-			power_set_string[2] = 0x30 + power_set%10;
-			power_set_string[1] = 0x30 + (power_set/10)%10;
-			power_set_string[0] = 0x30 + (power_set/100)%10;
-			power_set_string[3] = 'W';
-			power_set_string[4] = ' ';
-			//更新位置信息
-			power_set_encoderpos = power_set_encodernewpos;
+			//设置更新，将设置记录
+			nvs_logger.last_set_watts = power_set;
+			nvs_logger.last_set_mode = 0;
+			preferences.putBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
 			//更新显示
 			u8g2.firstPage();
 			do {
 				u8g2.setFont(u8g2_font_inb24_mf);
-				u8g2.drawStr(1, 48, power_set_string);
+				u8g2.setCursor(1, 48);
+				u8g2.print(power_set);u8g2.print("W");
 			} while ( u8g2.nextPage() );
 		} 
 
 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
+		#ifndef MODBUS_DEBUG
 		unsigned long currentadjust_time_gap = millis() - currentadjust_time_stamp;
 		if(currentadjust_time_gap > 5000){
 			// MODBUS更新部分，要不断的更新，因为输出电压在不断变化
@@ -400,6 +407,7 @@ void loop(void){
 			delay(50);
 			currentadjust_time_stamp = millis();
 		}
+		#endif
 	}
 	if (1 == working_mode)
 	{
@@ -410,30 +418,28 @@ void loop(void){
 			screen_mode = 0;
 			screen_mode_timestamp = millis();
 			//有新的输入要先检查当前模式
-			voltage_set = voltage_pre_set + voltage_set_encodernewpos*5;
+			voltage_set = last_voltage_set + voltage_set_encodernewpos*2.5;
+			voltage_set_encoderpos = voltage_set_encodernewpos;
+			#ifdef DEBUG
+			Serial.print("voltage_set = ");
+			Serial.println(voltage_set);
+			#endif
 			voltage_set = MAX(voltage_set,500);
 			voltage_set = MIN(voltage_set,3000);
-			voltage_set_string[2] = '.';
-			voltage_set_string[3] = 0x30 + (voltage_set/10)%10;
-			voltage_set_string[1] = 0x30 + (voltage_set/100)%10;
-			voltage_set_string[0] = 0x30 + (voltage_set/1000)%10;
-			voltage_set_string[4] = 'V';
-			//更新变化对比存储
-			voltage_set_encoderpos = voltage_set_encodernewpos;
+			//设置更新，将设置记录
+			nvs_logger.last_set_voltage = voltage_set;
+			nvs_logger.last_set_mode = 1;
+			preferences.putBytes("nvs-log", &nvs_logger, sizeof(nvs_logger));
 			//更新显示
 			u8g2.firstPage();
 			do {
 				u8g2.setFont(u8g2_font_inb24_mf);
-				u8g2.drawStr(1, 48, voltage_set_string);
+				u8g2.setCursor(1, 48);
+				u8g2.printf("%4.1f",voltage_set/100.0F);u8g2.print("V");
 			} while ( u8g2.nextPage() );
-			// //不同于恒功率控制，电压设置只需要一次,图方便就一直设置好了。
-			// //回写设定电压和限制电流
-			// node.setTransmitBuffer(0, voltage_set);
-			// node.setTransmitBuffer(1, 2000);
-			// result = node.writeMultipleRegisters(0, 2);
-			// delay(100);	
 		}
 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
+		#ifndef MODBUS_DEBUG
 		unsigned long voltageadjust_time_gap = millis() - voltageadjust_time_stamp;
 		if(voltageadjust_time_gap > 2000){
 			node.setTransmitBuffer(0, voltage_set);
@@ -442,6 +448,7 @@ void loop(void){
 			delay(50);
 			voltageadjust_time_stamp = millis();
 		}
+		#endif
 	}
 	if (0 == digitalRead(5))
 	{
@@ -483,7 +490,8 @@ void loop(void){
 			u8g2.firstPage();
 			do {
 				u8g2.setFont(u8g2_font_inb24_mf);
-				u8g2.drawStr(1, 48, power_set_string);
+				u8g2.setCursor(1, 48);
+				u8g2.print(power_set);u8g2.print("W");
 			} while ( u8g2.nextPage() );
 		}
 		if (1 == working_mode)
@@ -494,10 +502,10 @@ void loop(void){
 			u8g2.firstPage();
 			do {
 				u8g2.setFont(u8g2_font_inb24_mf);
-				u8g2.drawStr(1, 48, voltage_set_string);
+				u8g2.setCursor(1, 48);
+				u8g2.printf("%4.1f",voltage_set/100.0F);u8g2.print("V");
 			} while ( u8g2.nextPage() );
 		}
-
 	}
 	if (1 == screen_mode)
 	{
@@ -509,7 +517,7 @@ void loop(void){
 			u8g2.drawHLine(0,0,128);
 			u8g2.drawHLine(0,31,128);
 			u8g2.drawHLine(0,63,128);
-			u8g2.drawVLine(0,0,64);
+			u8g2.drawVLine(1,0,64);
 			u8g2.drawVLine(63,0,64);
 			u8g2.drawVLine(127,0,64);
 			char output_power_string[5] = "100W";
@@ -569,11 +577,8 @@ void loop(void){
 		}
 	}
 
-	// unsigned l.20ong running_time_stamp = micros();
-	//用于使用MODBUS读取DC-DC的信息，得到输出功率，进而对比起最大值
-	//读取功率数据
-	//！！！！！特别注意，如果读之前刚刚写入过，读取就会非常慢，写入后延时然后再读取。
-	//读取过快，功率显示闪动很大
+	//以下为正常循环
+	#ifndef MODBUS_DEBUG
 	unsigned long outputpower_updatetime_gap = millis() - outputpower_updatetime_stamp;
 	if(outputpower_updatetime_gap > 1000){
 		result = node.readHoldingRegisters(4, 1);
@@ -587,11 +592,13 @@ void loop(void){
 		}
 		outputpower_updatetime_stamp = millis();
 	}
+	#endif
 
 	//为了测试，直接截断功率赋值
-	// output_power = 200;
+	#ifdef MODBUS_DEBUG
+	output_power = 200;
+	#endif
 
-	// Serial.println(micros()-running_time_stamp);
 	//功率大于100W开始计时
 	unsigned long cumulative_time_gap = millis() - cumulative_time_stamp;
 	if(cumulative_time_gap > 1000){
@@ -611,16 +618,17 @@ void loop(void){
 	{
 		max_cadence = cadence;
 	}
-	//频率计数长时间不中断的时候，清零频率,从中断里不断更新时间戳
-	unsigned long cadence_gap = millis() - cadence_time_stamp;
-	if(cadence_gap > 5000){
-		cadence = 0;
-	}
 	//找到最大心率
 	if(heart_rate > max_heart_rate)
 	{
 		max_heart_rate = heart_rate;
 	}
+	//频率计数长时间不中断的时候，清零频率,从中断里不断更新时间戳
+	unsigned long cadence_gap = millis() - cadence_time_stamp;
+	if(cadence_gap > 5000){
+		cadence = 0;
+	}
+
 }
 
 // void loop(void) {
