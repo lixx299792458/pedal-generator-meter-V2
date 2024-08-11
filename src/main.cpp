@@ -19,12 +19,16 @@ CRGB leds[NUM_LEDS];
 
 //旋转编码器定义部分
 //旋转编码器貌似需要很快的主循环
-#define ENCODER_USE_INTERRUPTS
+//这个库的作者是个大聪明，认为7-12编号的IO口是FLASH用的。
+//在这里定义也不好使，只能修改源代码
+// #define CORE_INT7_PIN	7
+// #define CORE_INT11_PIN	11
 Encoder myEnc(7, 11);
 
 //屏幕相关定义
 //使用硬件SPI的时候，即使不使用MISO等端口,端口也不能作为普通IO口使用。
 U8G2_SSD1306_128X64_NONAME_1_4W_SW_SPI u8g2(U8G2_R0, /* clock=*/ 2, /* data=*/ 3, /* cs=*/ 9, /* dc=*/ 6, /* reset=*/ 10);
+// U8G2_SSD1306_128X64_NONAME_1_4W_HW_SPI u8g2(U8G2_R0, 12, 6, 10);
 
 //modbus主机部分
 ModbusMaster node;
@@ -79,6 +83,8 @@ unsigned long cumulative_time_stamp = 0;
 unsigned long currentadjust_time_stamp = 0;
 unsigned long outputpower_updatetime_stamp = 0;
 unsigned long voltageadjust_time_stamp = 0;
+unsigned long running_time_stamp = 0;
+
 //MODEBUS从机部分
 #define SLAVE_ID 1
 //定义1个从机类
@@ -289,6 +295,10 @@ void setup(void) {
 		u8g2.print(nvs_logger.cumulative_Seconds);	
 		u8g2.print("S");
 	} while ( u8g2.nextPage() );
+	//设置编码器引脚
+	pinMode(7,INPUT_PULLUP);
+	pinMode(11,INPUT_PULLUP);
+	// pinMode(10,OUTPUT);
 
 	//上电后立刻关闭LED
 	FastLED.addLeds<NEOPIXEL, DATA_PIN>(leds, NUM_LEDS);  // GRB ordering is assumed
@@ -297,7 +307,9 @@ void setup(void) {
 	//使用硬件频率计
 	attachInterrupt(18,frequency_meter,FALLING);
 	//开始连接蓝牙
-	// BLE_connect();
+	#ifndef DEBUG
+	BLE_connect();
+	#endif
 	//MODBUS主机部分
 	Serial1.begin(115200);
 	node.begin(1, Serial1);
@@ -318,6 +330,11 @@ void setup(void) {
 
 void loop(void){
 	//在主循环中连接蓝牙
+	#ifdef DEBUG
+	Serial.print("loop time = ");
+	Serial.println(micros()-running_time_stamp);
+	running_time_stamp = micros();
+	#endif
 	if (doConnect == true) {
 		if (connectToServer()) {
 			#ifdef DEBUG
