@@ -9,8 +9,6 @@
 #include <FastLED.h>
 
 #define DEBUG
-#define MODBUS_DEBUG
-
 
 //LED指示灯定义部分
 #define NUM_LEDS 1
@@ -138,19 +136,19 @@ void frequency_meter()
 
 //蓝牙定义部分
 //蓝牙部分
-static BLEUUID service_HR_UUID(BLEUUID((uint16_t)0x180D));
-static BLEUUID char_HR_UUID(BLEUUID((uint16_t)0x2A37));
+BLEUUID service_HR_UUID(BLEUUID((uint16_t)0x180D));
+BLEUUID char_HR_UUID(BLEUUID((uint16_t)0x2A37));
 
 // static BLEUUID service_cadence_UUID(BLEUUID((uint16_t)0x1816));
 // static BLEUUID char_cadence_UUID(BLEUUID((uint16_t)0x2A5B));
 
-static boolean doConnect = false;
-static boolean connected = false;
-static boolean doScan = false;
-static BLERemoteCharacteristic* pRemoteCharacteristic;
-static BLEAdvertisedDevice* myDevice;
+boolean doConnect = false;
+boolean connected = false;
+boolean doScan = false;
+BLERemoteCharacteristic* pRemoteCharacteristic;
+BLEAdvertisedDevice* myDevice;
 
-static void notifyCallback(
+void notifyCallback(
 	BLERemoteCharacteristic* pBLERemoteCharacteristic,
 	uint8_t* pData,
 	size_t length,
@@ -261,6 +259,9 @@ void BLE_connect(){
 	doConnect = false;
 	connected = false;
 	doScan = false;
+	#ifdef DEBUG
+	Serial.println("BLE_connect called start");
+	#endif
 	BLEDevice::init("");
 	BLEScan* pBLEScan = BLEDevice::getScan();
 	pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
@@ -268,6 +269,9 @@ void BLE_connect(){
 	pBLEScan->setWindow(449);
 	pBLEScan->setActiveScan(true);
 	pBLEScan->start(5, false);
+	#ifdef DEBUG
+	Serial.println("BLE_connect called ended");
+	#endif
 }
 
 void setup(void) {
@@ -306,18 +310,18 @@ void setup(void) {
 	FastLED.show();
 	//使用硬件频率计
 	attachInterrupt(18,frequency_meter,FALLING);
-	//开始连接蓝牙
-	#ifndef DEBUG
-	BLE_connect();
+
+	#ifdef DEBUG
+	Serial.begin(115200, SERIAL_8N1);
 	#endif
+	//开始连接蓝牙
+	BLE_connect();
+
 	//MODBUS主机部分
 	Serial1.begin(115200);
 	node.begin(1, Serial1);
-
 	// //MODEBUS从机设置
-	#ifdef DEBUG
-		Serial.begin(115200, SERIAL_8N1);
-	#endif
+
 	#ifndef DEBUG
 		Serial.begin(115200, SERIAL_8N1);
 		mb.begin(&Serial);
@@ -329,12 +333,15 @@ void setup(void) {
 }
 
 void loop(void){
+	//灯总是无缘无故的亮
+	leds[0] = CRGB::Black;
+	FastLED.show();
 	//在主循环中连接蓝牙
-	#ifdef DEBUG
-	Serial.print("loop time = ");
-	Serial.println(micros()-running_time_stamp);
-	running_time_stamp = micros();
-	#endif
+	// #ifdef DEBUG
+	// Serial.print("loop time = ");
+	// Serial.println(micros()-running_time_stamp);
+	// running_time_stamp = micros();
+	// #endif
 	if (doConnect == true) {
 		if (connectToServer()) {
 			#ifdef DEBUG
@@ -360,6 +367,7 @@ void loop(void){
 			BLE_connect();
 		}
 	}
+/*
 	//就一个串口，调试的时候就不启动modbus从机了
 	#ifndef DEBUG
 		modbusrtu_dataprepare();
@@ -403,7 +411,6 @@ void loop(void){
 		} 
 
 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
-		#ifndef MODBUS_DEBUG
 		unsigned long currentadjust_time_gap = millis() - currentadjust_time_stamp;
 		if(currentadjust_time_gap > 5000){
 			// MODBUS更新部分，要不断的更新，因为输出电压在不断变化
@@ -425,7 +432,6 @@ void loop(void){
 			delay(50);
 			currentadjust_time_stamp = millis();
 		}
-		#endif
 	}
 	if (1 == working_mode)
 	{
@@ -457,7 +463,6 @@ void loop(void){
 			} while ( u8g2.nextPage() );
 		}
 		//改成5S更新一次，且每次更新完，读取数据之前，需要延时，否则会卡住
-		#ifndef MODBUS_DEBUG
 		unsigned long voltageadjust_time_gap = millis() - voltageadjust_time_stamp;
 		if(voltageadjust_time_gap > 2000){
 			node.setTransmitBuffer(0, voltage_set);
@@ -466,8 +471,8 @@ void loop(void){
 			delay(50);
 			voltageadjust_time_stamp = millis();
 		}
-		#endif
 	}
+
 	if (0 == digitalRead(5))
 	{
 
@@ -596,7 +601,6 @@ void loop(void){
 	}
 
 	//以下为正常循环
-	#ifndef MODBUS_DEBUG
 	unsigned long outputpower_updatetime_gap = millis() - outputpower_updatetime_stamp;
 	if(outputpower_updatetime_gap > 1000){
 		result = node.readHoldingRegisters(4, 1);
@@ -610,10 +614,9 @@ void loop(void){
 		}
 		outputpower_updatetime_stamp = millis();
 	}
-	#endif
 
 	//为了测试，直接截断功率赋值
-	#ifdef MODBUS_DEBUG
+	#ifdef DEBUG
 	output_power = 200;
 	#endif
 
@@ -646,7 +649,7 @@ void loop(void){
 	if(cadence_gap > 5000){
 		cadence = 0;
 	}
-
+*/
 }
 
 // void loop(void) {
